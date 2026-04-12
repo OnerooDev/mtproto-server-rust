@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
         let mask_host = cfg.mask_host.clone();
         tokio::spawn(async move {
             if let Err(e) = handle(stream, peer, state, mask_host).await {
-                debug!(%peer, "connection closed: {e}");
+                debug!(%peer, "connection closed: {e:#}");
             }
         });
     }

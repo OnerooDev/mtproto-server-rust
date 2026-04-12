@@ -180,6 +180,7 @@ pub async fn send_server_hello<W: AsyncWrite + Unpin>(
     w.write_all(&wrap_app_data(&fake_fin)).await?;
 
     w.flush().await?;
+    debug!("send_server_hello: sent ServerHello + CCS + 2 fake AppData records");
     Ok(())
 }
 
@@ -218,6 +219,7 @@ pub async fn read_first_app_data<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<
         let mut hdr = [0u8; TLS_RECORD_HEADER];
         r.read_exact(&mut hdr).await?;
         let len = u16::from_be_bytes([hdr[3], hdr[4]]) as usize;
+        debug!(record_type = hdr[0], len, "read_first_app_data: got TLS record");
         match hdr[0] {
             TLS_APP_DATA => {
                 let mut payload = vec![0u8; len];
@@ -225,14 +227,16 @@ pub async fn read_first_app_data<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<
                 // Small AppData = client's fake Finished (< 64 bytes).
                 // Real MTProto init is always exactly 64 bytes.
                 if payload.len() >= 64 {
+                    debug!(len, "read_first_app_data: returning AppData as MTProto init");
                     return Ok(payload);
                 }
-                debug!(len, "skipping small AppData (client fake Finished)");
+                debug!(len, "read_first_app_data: skipping small AppData (fake Finished)");
             }
             0x14 | 0x16 => {
                 // ChangeCipherSpec or Handshake — discard
                 let mut discard = vec![0u8; len];
                 r.read_exact(&mut discard).await?;
+                debug!(record_type = hdr[0], "read_first_app_data: discarded handshake/CCS record");
             }
             t => bail!("unexpected TLS record type 0x{:02x} before first AppData", t),
         }
