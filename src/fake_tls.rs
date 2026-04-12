@@ -78,18 +78,32 @@ pub fn validate_hello_hmac(hello: &[u8], secret: &[u8]) -> Result<()> {
     mac.update(&msg);
     let result = mac.finalize().into_bytes();
 
-    // session_id IS the full 32-byte HMAC
+    // Try variant 2: HMAC over handshake payload only (skip 5-byte TLS record header)
+    let result2 = {
+        let mut msg2 = msg[5..].to_vec();
+        // session_id in payload is at sid_start-5 .. sid_end-5
+        for b in &mut msg2[sid_start - 5..sid_end - 5] { *b = 0; }
+        let mut mac2 = HmacSha256::new_from_slice(secret)
+            .map_err(|e| anyhow::anyhow!("hmac init: {e}"))?;
+        mac2.update(&msg2);
+        mac2.finalize().into_bytes()
+    };
+
     let session_id = &hello[sid_start..sid_end];
     debug!(
-        computed  = %hex::encode(&result),
-        session_id = %hex::encode(session_id),
-        secret    = %hex::encode(secret),
-        "FakeTLS HMAC check"
+        v1_full_record = %hex::encode(&result),
+        v2_no_tls_hdr  = %hex::encode(&result2),
+        session_id     = %hex::encode(session_id),
+        "FakeTLS HMAC variants"
     );
-    if result.as_slice() != session_id {
-        bail!("FakeTLS HMAC mismatch — wrong secret or not a proxy client");
+
+    if result.as_slice() == session_id {
+        return Ok(());
     }
-    Ok(())
+    if result2.as_slice() == session_id {
+        return Ok(());
+    }
+    bail!("FakeTLS HMAC mismatch — wrong secret or not a proxy client")
 }
 
 /// Send a synthetic TLS ServerHello + ChangeCipherSpec + empty ApplicationData.
