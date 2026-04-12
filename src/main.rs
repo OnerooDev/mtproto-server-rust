@@ -152,7 +152,7 @@ async fn handle_faketls(
     }
 
     let session_id = fake_tls::extract_session_id(&hello).to_vec();
-    fake_tls::send_server_hello(&mut stream, &domain, &session_id, &secret).await?;
+    fake_tls::send_server_hello(&mut stream, &domain, &hello, &session_id, &secret).await?;
 
     // The 64-byte MTProto obfuscation init arrives in the first ApplicationData record
     let first_payload = fake_tls::read_first_app_data(&mut stream)

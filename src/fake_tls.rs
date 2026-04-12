@@ -5,8 +5,8 @@
 //!  1. Read the TLS ClientHello from the client.
 //!  2. Validate the HMAC-SHA256 in the random field using the user secret.
 //!  3. Send back a synthetic TLS ServerHello + ChangeCipherSpec + fake AppData.
-//!     The ServerHello random must itself be HMAC-SHA256(secret, server_hello_zeroed)
-//!     because the Telegram client verifies this before proceeding.
+//!     The ServerHello random is HMAC-SHA256(secret, client_random ‖ full_response_with_server_random_zeroed)
+//!     (see TDLib `td/mtproto/TlsInit.cpp::wait_hello_response`).
 //!  4. From that point on, all data is wrapped in TLS 1.3 ApplicationData records
 //!     (type 0x17, version 0x0303, 2-byte length), but the inner content is plain
 //!     obfuscated MTProto.
@@ -104,11 +104,8 @@ pub fn extract_session_id(hello: &[u8]) -> &[u8] {
     &hello[44..end]
 }
 
-/// Build the ServerHello TLS record with zeros in the random field, then
-/// compute HMAC-SHA256(secret, record) and place it as the server random.
-///
-/// The Telegram client verifies this HMAC before sending its own data.
-fn build_server_hello_record(session_id: &[u8], secret: &[u8]) -> Vec<u8> {
+/// Build the ServerHello TLS record with **zeros** in the random field (HMAC applied later).
+fn build_server_hello_record_zeroed(session_id: &[u8]) -> Vec<u8> {
     // --- ServerHello body (random = 0x00 * 32 initially) ---
     let mut sh_body = Vec::new();
     sh_body.extend_from_slice(&[0x03, 0x03]); // legacy_version
@@ -121,7 +118,7 @@ fn build_server_hello_record(session_id: &[u8], secret: &[u8]) -> Vec<u8> {
     // Extensions: supported_versions (TLS 1.3) + key_share (empty)
     let mut exts = Vec::new();
     exts.extend_from_slice(&[0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04]); // supported_versions
-    exts.extend_from_slice(&[0x00, 0x33, 0x00, 0x02, 0x00, 0x00]);       // key_share (empty)
+    exts.extend_from_slice(&[0x00, 0x33, 0x00, 0x02, 0x00, 0x00]); // key_share (empty)
     let exts_len = exts.len() as u16;
     sh_body.extend_from_slice(&exts_len.to_be_bytes());
     sh_body.extend_from_slice(&exts);
@@ -142,36 +139,59 @@ fn build_server_hello_record(session_id: &[u8], secret: &[u8]) -> Vec<u8> {
     record.extend_from_slice(&rec_len.to_be_bytes());
     record.extend_from_slice(&handshake);
 
-    // --- Compute HMAC over record-with-zeros and place it as server random ---
-    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC init");
-    mac.update(&record);
-    let hmac_out = mac.finalize().into_bytes();
-    record[RANDOM_POS..RANDOM_POS + RANDOM_LEN].copy_from_slice(&hmac_out[..RANDOM_LEN]);
-
     record
 }
 
-/// Send a synthetic TLS ServerHello + ChangeCipherSpec + fake server ApplicationData.
-///
-/// After the ServerHello, TLS 1.3 requires the server to send its encrypted
-/// handshake records (EncryptedExtensions, Certificate, Finished etc.) wrapped
-/// in ApplicationData records.  The Telegram client waits for these before
-/// sending its own CCS + Finished + MTProto init.
+/// Build ServerHello + CCS + first ApplicationData per TDLib `wait_hello_response`:
+/// `HMAC-SHA256(secret, client_random ‖ response_with_server_random_zeroed)`.
+fn build_faketls_server_flight(
+    client_hello: &[u8],
+    session_id: &[u8],
+    secret: &[u8],
+) -> Result<Vec<u8>> {
+    if client_hello.len() < RANDOM_POS + RANDOM_LEN {
+        bail!("ClientHello too short for server flight");
+    }
+
+    let sh_record = build_server_hello_record_zeroed(session_id);
+    const CCS: &[u8] = &[0x14, 0x03, 0x03, 0x00, 0x01, 0x01];
+    let fake_payload = [0u8; 64];
+    let mut app_record = Vec::with_capacity(TLS_RECORD_HEADER + fake_payload.len());
+    app_record.push(TLS_APP_DATA);
+    app_record.extend_from_slice(&TLS_VERSION);
+    app_record.extend_from_slice(&(fake_payload.len() as u16).to_be_bytes());
+    app_record.extend_from_slice(&fake_payload);
+
+    let mut full = Vec::new();
+    full.extend_from_slice(&sh_record);
+    full.extend_from_slice(CCS);
+    full.extend_from_slice(&app_record);
+
+    let mut mac = HmacSha256::new_from_slice(secret)
+        .map_err(|e| anyhow::anyhow!("HMAC init: {e}"))?;
+    mac.update(&client_hello[RANDOM_POS..RANDOM_POS + RANDOM_LEN]);
+    for b in &mut full[RANDOM_POS..RANDOM_POS + RANDOM_LEN] {
+        *b = 0;
+    }
+    mac.update(&full);
+    let hmac_out = mac.finalize().into_bytes();
+    full[RANDOM_POS..RANDOM_POS + RANDOM_LEN].copy_from_slice(&hmac_out[..RANDOM_LEN]);
+
+    Ok(full)
+}
+
+/// Send ServerHello + ChangeCipherSpec + fake ApplicationData (TDLib-compatible).
 pub async fn send_server_hello<W: AsyncWrite + Unpin>(
     w: &mut W,
     _domain: &str,
+    client_hello: &[u8],
     session_id: &[u8],
     secret: &[u8],
 ) -> Result<()> {
-    // ServerHello record with HMAC-computed server random
-    let sh_record = build_server_hello_record(session_id, secret);
-    w.write_all(&sh_record).await?;
-
-    // ChangeCipherSpec
-    w.write_all(&[0x14, 0x03, 0x03, 0x00, 0x01, 0x01]).await?;
-
+    let flight = build_faketls_server_flight(client_hello, session_id, secret)?;
+    w.write_all(&flight).await?;
     w.flush().await?;
-    debug!("send_server_hello: sent ServerHello + CCS");
+    debug!("send_server_hello: sent ServerHello + CCS + fake AppData");
     Ok(())
 }
 
