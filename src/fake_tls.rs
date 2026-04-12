@@ -92,8 +92,29 @@ pub fn validate_hello_hmac(hello: &[u8], secret: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Send a synthetic TLS ServerHello + ChangeCipherSpec + empty ApplicationData.
-pub async fn send_server_hello<W: AsyncWrite + Unpin>(w: &mut W, _domain: &str) -> Result<()> {
+/// Extract the session_id bytes from a ClientHello (for mirroring back in ServerHello).
+pub fn extract_session_id(hello: &[u8]) -> &[u8] {
+    // Layout: 5 (record hdr) + 1 (hs type) + 3 (hs len) + 2 (ver) + 32 (random) = 43
+    // Byte 43: session_id length; bytes 44..44+len: session_id
+    if hello.len() < 44 {
+        return &[];
+    }
+    let sid_len = hello[43] as usize;
+    let end = 44 + sid_len;
+    if hello.len() < end {
+        return &[];
+    }
+    &hello[44..end]
+}
+
+/// Send a synthetic TLS ServerHello + ChangeCipherSpec.
+/// `session_id` should be the session_id extracted from the ClientHello so the
+/// client sees its own session_id echoed back (required by TLS 1.3 compat mode).
+pub async fn send_server_hello<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    _domain: &str,
+    session_id: &[u8],
+) -> Result<()> {
     // Minimal TLS 1.3-style ServerHello (TLS 1.2 on the wire)
     let server_random: [u8; 32] = rand::random();
 
@@ -101,8 +122,9 @@ pub async fn send_server_hello<W: AsyncWrite + Unpin>(w: &mut W, _domain: &str) 
     let mut server_hello_body = Vec::new();
     server_hello_body.extend_from_slice(&[0x03, 0x03]); // version
     server_hello_body.extend_from_slice(&server_random);
-    server_hello_body.push(32); // session_id length
-    server_hello_body.extend_from_slice(&[0u8; 32]); // session_id (zeros)
+    // Mirror back the client's session_id (TLS 1.3 compat mode requires this)
+    server_hello_body.push(session_id.len() as u8);
+    server_hello_body.extend_from_slice(session_id);
     server_hello_body.extend_from_slice(&[0x13, 0x01]); // cipher TLS_AES_128_GCM_SHA256
     server_hello_body.push(0x00); // compression: none
 
