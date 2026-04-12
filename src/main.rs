@@ -131,7 +131,9 @@ async fn handle_obfuscated(
         .with_context(|| format!("connect to DC{dc_id} {tg_host}:{tg_port}"))?;
     tg.set_nodelay(true)?;
 
-    let (tg_recv, tg_send) = tg_mtg::send_telegram_handshake(&mut tg, &proxy_secret, dc_id)
+    // Proxy→Telegram connection uses standard obfuscated protocol with no secret.
+    // The user secret is only for the client→proxy leg.
+    let (tg_recv, tg_send) = tg_mtg::send_telegram_handshake(&mut tg, &[], dc_id)
         .await
         .context("Telegram DC obfuscation handshake")?;
 
@@ -195,7 +197,9 @@ async fn handle_faketls(
         .with_context(|| format!("connect to DC{} {tg_host}:{tg_port}", info.dc_id))?;
     tg.set_nodelay(true)?;
 
-    let (tg_recv, tg_send) = tg_mtg::send_telegram_handshake(&mut tg, &secret, info.dc_id)
+    // Proxy→Telegram connection uses standard obfuscated protocol with no secret.
+    // The user secret is only for the client→proxy leg.
+    let (tg_recv, tg_send) = tg_mtg::send_telegram_handshake(&mut tg, &[], info.dc_id)
         .await
         .context("Telegram DC obfuscation handshake")?;
 

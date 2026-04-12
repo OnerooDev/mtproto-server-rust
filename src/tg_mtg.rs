@@ -4,7 +4,7 @@
 //! matching `github.com/9seconds/mtg` `obfuscation.Obfuscator.SendHandshake` and `conn`.
 
 use crate::crypto::AesCtr;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
@@ -72,10 +72,6 @@ pub async fn send_telegram_handshake<W: AsyncWrite + Unpin>(
     secret: &[u8],
     dc_id: i16,
 ) -> Result<(AesCtr, AesCtr)> {
-    if secret.is_empty() {
-        bail!("empty proxy secret");
-    }
-
     let copy_frame = generate_handshake_frame(dc_id);
     let mut frame = copy_frame;
 
