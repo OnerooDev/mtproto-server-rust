@@ -38,26 +38,24 @@ pub async fn read_client_hello<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8
     Ok(full)
 }
 
-/// Validate the HMAC embedded in the TLS ClientHello session_id.
+/// Validate the HMAC embedded in the TLS ClientHello **random** field.
 ///
 /// Protocol (alexbers-compatible):
-///   key  = 0xEE || raw_secret_bytes || domain_bytes
-///   msg  = full ClientHello with session_id zeroed (all 32 bytes)
-///   hmac = HMAC-SHA256(key, msg)
+///   key    = 0xEE || raw_secret_bytes || domain_bytes
+///   digest = hello[11..43]  (32-byte TLS random field)
+///   msg    = hello with random field zeroed (hello[11..43] = 0x00 * 32)
+///   hmac   = HMAC-SHA256(key, msg)
 ///
-///   session_id[0..28] must equal hmac[0..28]
-///   session_id[28..32] = hmac[28..32] XOR big-endian(unix_timestamp)
+///   digest[0..28] must equal hmac[0..28]
+///   digest[28..32] = hmac[28..32] XOR big-endian(unix_timestamp)  — not checked here
 pub fn validate_hello_hmac(hello: &[u8], secret: &[u8], domain: &str) -> Result<()> {
-    if hello.len() < 76 {
+    // Minimum size: 5 (record hdr) + 1 (type) + 3 (len) + 2 (ver) + 32 (random) = 43
+    if hello.len() < 43 {
         bail!("ClientHello too short");
     }
-    let session_id_offset = 5 + 1 + 3 + 2 + 32; // = 43
-    let sid_len = hello[session_id_offset] as usize;
-    if sid_len != 32 {
-        bail!("unexpected session_id length {}", sid_len);
-    }
-    let sid_start = session_id_offset + 1; // 44
-    let sid_end = sid_start + 32;          // 76
+
+    const DIGEST_POS: usize = 11; // start of TLS random field
+    const DIGEST_LEN: usize = 32;
 
     // key = 0xEE || raw_secret || domain_ascii
     let mut key = Vec::with_capacity(1 + secret.len() + domain.len());
@@ -65,9 +63,9 @@ pub fn validate_hello_hmac(hello: &[u8], secret: &[u8], domain: &str) -> Result<
     key.extend_from_slice(secret);
     key.extend_from_slice(domain.as_bytes());
 
-    // Zero session_id for HMAC computation
+    // Zero the random field for HMAC computation
     let mut msg = hello.to_vec();
-    for b in &mut msg[sid_start..sid_end] {
+    for b in &mut msg[DIGEST_POS..DIGEST_POS + DIGEST_LEN] {
         *b = 0;
     }
 
@@ -76,18 +74,18 @@ pub fn validate_hello_hmac(hello: &[u8], secret: &[u8], domain: &str) -> Result<
     mac.update(&msg);
     let hmac_result = mac.finalize().into_bytes();
 
-    // session_id[0..28] must equal hmac[0..28]
-    // (last 4 bytes are hmac[28..32] XOR unix_timestamp — not checked here)
-    let session_id = &hello[sid_start..sid_end];
-    let mismatch = session_id[..28]
+    // Compare first 28 bytes of digest vs HMAC
+    // (last 4 bytes encode client timestamp XOR hmac[28..32])
+    let digest = &hello[DIGEST_POS..DIGEST_POS + DIGEST_LEN];
+    let mismatch = digest[..28]
         .iter()
         .zip(hmac_result[..28].iter())
         .any(|(a, b)| a != b);
 
     if mismatch {
         debug!(
-            hmac28 = %hex::encode(&hmac_result[..28]),
-            sid28  = %hex::encode(&session_id[..28]),
+            hmac28   = %hex::encode(&hmac_result[..28]),
+            digest28 = %hex::encode(&digest[..28]),
             "FakeTLS HMAC mismatch"
         );
         bail!("FakeTLS HMAC mismatch — wrong secret or not a proxy client");
