@@ -56,12 +56,14 @@ pub async fn pipe(
 }
 
 /// Same as `pipe` but the client side is wrapped in TLS ApplicationData records.
-/// Each direction reads/writes `TLS_APP_DATA` framing.
+/// `initial_tg_data` — already-decrypted bytes from the first AppData (after the 64-byte init)
+/// that should be forwarded to Telegram before entering the relay loop.
 pub async fn pipe_faketls(
     client: TcpStream,
     tg: TcpStream,
     mut client_dec: AesCtr,
     mut client_enc: AesCtr,
+    initial_tg_data: Vec<u8>,
 ) -> anyhow::Result<()> {
     use crate::fake_tls::{read_app_data, wrap_app_data};
 
@@ -69,6 +71,9 @@ pub async fn pipe_faketls(
     let (mut tr, mut tw) = tokio::io::split(tg);
 
     let client_to_tg = async {
+        if !initial_tg_data.is_empty() {
+            tw.write_all(&initial_tg_data).await?;
+        }
         loop {
             let mut payload = read_app_data(&mut cr).await?;
             client_dec.apply(&mut payload);

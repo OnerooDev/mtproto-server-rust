@@ -143,30 +143,53 @@ async fn handle_faketls(
         .await
         .context("read ClientHello")?;
 
-    let (secret, domain, dc_id) = try_secrets_faketls(&hello, &state.secrets)?;
+    let (secret, domain) = try_secrets_faketls(&hello, &state.secrets)?;
 
-    // Replay check on random[0..8] inside the hello
+    // Replay check on TLS random[0..8] (hello[11..19])
     let token: [u8; 8] = hello[11..19].try_into().unwrap();
     if state.replay.check_and_insert(token) {
         bail!("replay attack detected from {peer}");
     }
 
-    info!(%peer, dc_id, "new FakeTLS connection");
-
     fake_tls::send_server_hello(&mut stream, &domain).await?;
 
-    let header = fake_tls::extract_obfuscation_header(&hello)?;
-    let (dec_key, dec_iv, enc_key, enc_iv) = derive_keys(&header, &secret);
-    let client_dec = AesCtr::new(&dec_key, &dec_iv);
+    // The 64-byte MTProto obfuscation init arrives in the first ApplicationData record
+    let first_payload = fake_tls::read_app_data(&mut stream)
+        .await
+        .context("read first AppData")?;
+    if first_payload.len() < 64 {
+        bail!("first AppData too short: {} bytes", first_payload.len());
+    }
+
+    let init: [u8; 64] = first_payload[..64].try_into().unwrap();
+    let (dec_key, dec_iv, enc_key, enc_iv) = derive_keys(&init, &secret);
+
+    let mut client_dec = AesCtr::new(&dec_key, &dec_iv);
     let client_enc = AesCtr::new(&enc_key, &enc_iv);
 
-    let (tg_host, tg_port) = telegram::dc_addr(dc_id, state.prefer_ipv6);
+    // Decrypt init to advance keystream and extract DC id
+    let mut init_plain = init;
+    client_dec.apply(&mut init_plain);
+    let info = handshake::parse_handshake(&init_plain).context("parse FakeTLS init")?;
+
+    info!(%peer, dc_id = info.dc_id, "new FakeTLS connection");
+
+    // Decrypt any remaining bytes from the first AppData (continuation after init)
+    let leftover = if first_payload.len() > 64 {
+        let mut rest = first_payload[64..].to_vec();
+        client_dec.apply(&mut rest);
+        rest
+    } else {
+        vec![]
+    };
+
+    let (tg_host, tg_port) = telegram::dc_addr(info.dc_id, state.prefer_ipv6);
     let tg = TcpStream::connect((tg_host, tg_port))
         .await
-        .with_context(|| format!("connect to DC{dc_id} {tg_host}:{tg_port}"))?;
+        .with_context(|| format!("connect to DC{} {tg_host}:{tg_port}", info.dc_id))?;
     tg.set_nodelay(true)?;
 
-    proxy::pipe_faketls(stream, tg, client_dec, client_enc).await
+    proxy::pipe_faketls(stream, tg, client_dec, client_enc, leftover).await
 }
 
 // ---------------------------------------------------------------------------
@@ -203,33 +226,13 @@ fn try_secrets_obfuscated(
 fn try_secrets_faketls(
     hello: &[u8],
     secrets: &HashMap<String, SecretMode>,
-) -> Result<(Vec<u8>, String, i16)> {
+) -> Result<(Vec<u8>, String)> {
     for (_name, mode) in secrets {
         if let SecretMode::FakeTls { secret, domain } = mode {
             if fake_tls::validate_hello_hmac(hello, secret).is_ok() {
-                // Extract 64-byte header and parse DC id
-                let dc_id = extract_faketls_dc_id(hello, secret).unwrap_or(1);
-                return Ok((secret.clone(), domain.clone(), dc_id));
+                return Ok((secret.clone(), domain.clone()));
             }
         }
     }
     bail!("no matching FakeTLS secret")
-}
-
-fn extract_faketls_dc_id(hello: &[u8], secret: &[u8]) -> Result<i16> {
-    if hello.len() < 76 {
-        bail!("hello too short");
-    }
-    // Build 64-byte header: random(32) at hello[11..43] + session_id(32) at hello[44..76]
-    let mut header = [0u8; 64];
-    header[..32].copy_from_slice(&hello[11..43]);
-    header[32..].copy_from_slice(&hello[44..76]);
-
-    let (dec_key, dec_iv, _, _) = derive_keys(&header, secret);
-    let mut buf = header;
-    let mut dec = AesCtr::new(&dec_key, &dec_iv);
-    dec.apply(&mut buf);
-
-    let info = handshake::parse_handshake(&buf)?;
-    Ok(info.dc_id)
 }

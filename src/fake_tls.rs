@@ -77,26 +77,11 @@ pub fn validate_hello_hmac(hello: &[u8], secret: &[u8]) -> Result<()> {
     mac.update(&msg);
     let result = mac.finalize().into_bytes();
 
-    let expected = &hello[sid_end - 4..sid_end];
-    if &result[..4] != expected {
+    // session_id IS the full 32-byte HMAC
+    if result.as_slice() != &hello[sid_start..sid_end] {
         bail!("FakeTLS HMAC mismatch — wrong secret or not a proxy client");
     }
     Ok(())
-}
-
-/// Extract the 64-byte obfuscation header that the client hid in the TLS random field
-/// (bytes 6..38 of the handshake body, i.e. hello[11..43]).
-pub fn extract_obfuscation_header(hello: &[u8]) -> Result<[u8; 64]> {
-    // The full 64-byte MTProto init is split across random(32) + session_id(32)
-    if hello.len() < 76 {
-        bail!("ClientHello too short for obfuscation header extraction");
-    }
-    let mut header = [0u8; 64];
-    // random field: hello[11..43]
-    header[..32].copy_from_slice(&hello[11..43]);
-    // session_id field: hello[44..76]
-    header[32..].copy_from_slice(&hello[44..76]);
-    Ok(header)
 }
 
 /// Send a synthetic TLS ServerHello + ChangeCipherSpec + empty ApplicationData.
