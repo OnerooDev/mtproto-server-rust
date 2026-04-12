@@ -307,7 +307,6 @@ info "Config written → ${CONFIG_FILE}"
 cat > "${SERVICE_FILE}" <<EOF
 [Unit]
 Description=MTProto Proxy (Rust)
-Documentation=https://github.com/alexbers/mtprotoproxy
 After=network-online.target
 Wants=network-online.target
 

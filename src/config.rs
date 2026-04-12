@@ -19,9 +19,6 @@ pub struct Config {
     #[serde(default = "default_mask_host")]
     pub mask_host: String,
 
-    /// Max concurrent connections per user (0 = unlimited)
-    #[serde(default)]
-    pub max_connections: usize,
 }
 
 fn default_mask_host() -> String {

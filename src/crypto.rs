@@ -30,7 +30,7 @@ impl AesCtr {
 ///   bytes 60..63  — DC ID (little-endian i16 + 2 padding)
 ///   bytes 64..    — timestamp (4 bytes, if present)
 ///
-/// Key derivation (same as alexbers' Python):
+/// Key derivation :
 ///   key_material = sha256(pre_key[0..32] + secret)
 ///   iv           = pre_key[32..48]       (16 bytes)
 ///   reverse_key  = sha256(pre_key[0..32] reversed + secret)
