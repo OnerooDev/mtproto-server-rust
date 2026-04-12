@@ -34,12 +34,12 @@ struct State {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("mtproxy=info".parse().unwrap()),
-        )
-        .init();
+    let filter = if std::env::var("RUST_LOG").is_ok() {
+        tracing_subscriber::EnvFilter::from_default_env()
+    } else {
+        tracing_subscriber::EnvFilter::new("mtproxy=info")
+    };
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let cli = Cli::parse();
     let raw = std::fs::read_to_string(&cli.config)
