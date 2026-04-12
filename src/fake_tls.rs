@@ -83,9 +83,12 @@ pub fn validate_hello_hmac(hello: &[u8], secret: &[u8], domain: &str) -> Result<
         .any(|(a, b)| a != b);
 
     if mismatch {
+        let hello_hex = hex::encode(&hello[..hello.len().min(80)]);
         debug!(
+            key      = %hex::encode(&key),
             hmac28   = %hex::encode(&hmac_result[..28]),
             digest28 = %hex::encode(&digest[..28]),
+            hello80  = %hello_hex,
             "FakeTLS HMAC mismatch"
         );
         bail!("FakeTLS HMAC mismatch — wrong secret or not a proxy client");
