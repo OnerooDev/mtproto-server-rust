@@ -5,6 +5,7 @@ mod handshake;
 mod proxy;
 mod replay;
 mod telegram;
+mod tg_mtg;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -106,7 +107,7 @@ async fn handle_obfuscated(
     let mut init = [0u8; 64];
     stream.read_exact(&mut init).await.context("read init")?;
 
-    let (dec_key, dec_iv, enc_key, enc_iv, dc_id, _protocol) =
+    let (dec_key, dec_iv, enc_key, enc_iv, dc_id, _protocol, proxy_secret) =
         try_secrets_obfuscated(&init, &state.secrets)?;
 
     // Replay check on pre_key[0..8]
@@ -125,12 +126,16 @@ async fn handle_obfuscated(
     client_dec.apply(&mut dummy);
 
     let (tg_host, tg_port) = telegram::dc_addr(dc_id, state.prefer_ipv6);
-    let tg = TcpStream::connect((tg_host, tg_port))
+    let mut tg = TcpStream::connect((tg_host, tg_port))
         .await
         .with_context(|| format!("connect to DC{dc_id} {tg_host}:{tg_port}"))?;
     tg.set_nodelay(true)?;
 
-    proxy::pipe(stream, tg, client_dec, client_enc).await
+    let (tg_recv, tg_send) = tg_mtg::send_telegram_handshake(&mut tg, &proxy_secret, dc_id)
+        .await
+        .context("Telegram DC obfuscation handshake")?;
+
+    proxy::pipe(stream, tg, client_dec, client_enc, tg_recv, tg_send).await
 }
 
 /// Handle a FakeTLS connection.
@@ -185,12 +190,25 @@ async fn handle_faketls(
     };
 
     let (tg_host, tg_port) = telegram::dc_addr(info.dc_id, state.prefer_ipv6);
-    let tg = TcpStream::connect((tg_host, tg_port))
+    let mut tg = TcpStream::connect((tg_host, tg_port))
         .await
         .with_context(|| format!("connect to DC{} {tg_host}:{tg_port}", info.dc_id))?;
     tg.set_nodelay(true)?;
 
-    proxy::pipe_faketls(stream, tg, client_dec, client_enc, leftover).await
+    let (tg_recv, tg_send) = tg_mtg::send_telegram_handshake(&mut tg, &secret, info.dc_id)
+        .await
+        .context("Telegram DC obfuscation handshake")?;
+
+    proxy::pipe_faketls(
+        stream,
+        tg,
+        client_dec,
+        client_enc,
+        tg_recv,
+        tg_send,
+        leftover,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -200,7 +218,15 @@ async fn handle_faketls(
 fn try_secrets_obfuscated(
     init: &[u8; 64],
     secrets: &HashMap<String, SecretMode>,
-) -> Result<([u8; 32], [u8; 16], [u8; 32], [u8; 16], i16, handshake::Protocol)> {
+) -> Result<(
+    [u8; 32],
+    [u8; 16],
+    [u8; 32],
+    [u8; 16],
+    i16,
+    handshake::Protocol,
+    Vec<u8>,
+)> {
     for (_name, mode) in secrets {
         if let SecretMode::FakeTls { .. } = mode {
             continue;
@@ -218,7 +244,15 @@ fn try_secrets_obfuscated(
                     continue;
                 }
             }
-            return Ok((dec_key, dec_iv, enc_key, enc_iv, info.dc_id, info.protocol));
+            return Ok((
+                dec_key,
+                dec_iv,
+                enc_key,
+                enc_iv,
+                info.dc_id,
+                info.protocol,
+                raw.to_vec(),
+            ));
         }
     }
     bail!("no matching secret for obfuscated connection")

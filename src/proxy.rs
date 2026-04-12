@@ -13,12 +13,14 @@ const BUF: usize = 16 * 1024;
 /// `client_dec` decrypts bytes arriving FROM the client.
 /// `client_enc` encrypts bytes going TO the client.
 ///
-/// The Telegram side is plain (no extra encryption).
+/// `tg_recv` / `tg_send` — AES-CTR for the obfuscated link to Telegram DC (see `tg_mtg`).
 pub async fn pipe(
     client: TcpStream,
     tg: TcpStream,
     mut client_dec: AesCtr,
     mut client_enc: AesCtr,
+    mut tg_recv: AesCtr,
+    mut tg_send: AesCtr,
 ) -> anyhow::Result<()> {
     let (mut cr, mut cw) = tokio::io::split(client);
     let (mut tr, mut tw) = tokio::io::split(tg);
@@ -31,6 +33,7 @@ pub async fn pipe(
                 break;
             }
             client_dec.apply(&mut buf[..n]);
+            tg_send.apply(&mut buf[..n]);
             tw.write_all(&buf[..n]).await?;
         }
         tw.shutdown().await?;
@@ -44,6 +47,7 @@ pub async fn pipe(
             if n == 0 {
                 break;
             }
+            tg_recv.apply(&mut buf[..n]);
             client_enc.apply(&mut buf[..n]);
             cw.write_all(&buf[..n]).await?;
         }
@@ -63,7 +67,9 @@ pub async fn pipe_faketls(
     tg: TcpStream,
     mut client_dec: AesCtr,
     mut client_enc: AesCtr,
-    initial_tg_data: Vec<u8>,
+    mut tg_recv: AesCtr,
+    mut tg_send: AesCtr,
+    mut initial_tg_data: Vec<u8>,
 ) -> anyhow::Result<()> {
     use crate::fake_tls::{read_app_data, wrap_app_data};
 
@@ -72,11 +78,13 @@ pub async fn pipe_faketls(
 
     let client_to_tg = async {
         if !initial_tg_data.is_empty() {
+            tg_send.apply(&mut initial_tg_data);
             tw.write_all(&initial_tg_data).await?;
         }
         loop {
             let mut payload = read_app_data(&mut cr).await?;
             client_dec.apply(&mut payload);
+            tg_send.apply(&mut payload);
             tw.write_all(&payload).await?;
         }
         #[allow(unreachable_code)]
@@ -91,6 +99,7 @@ pub async fn pipe_faketls(
             if n == 0 {
                 break;
             }
+            tg_recv.apply(&mut buf[..n]);
             client_enc.apply(&mut buf[..n]);
             // One TLS record per chunk: clients enforce a max inner size (~2878 bytes).
             for chunk in buf[..n].chunks(crate::fake_tls::FAKETLS_MAX_APP_DATA_INNER) {
