@@ -229,7 +229,7 @@ fn try_secrets_faketls(
 ) -> Result<(Vec<u8>, String)> {
     for (_name, mode) in secrets {
         if let SecretMode::FakeTls { secret, domain } = mode {
-            if fake_tls::validate_hello_hmac(hello, secret, domain).is_ok() {
+            if fake_tls::validate_hello_hmac(hello, secret).is_ok() {
                 return Ok((secret.clone(), domain.clone()));
             }
         }

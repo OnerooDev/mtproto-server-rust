@@ -48,7 +48,7 @@ pub async fn read_client_hello<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8
 ///
 ///   digest[0..28] must equal hmac[0..28]
 ///   digest[28..32] = hmac[28..32] XOR big-endian(unix_timestamp)  — not checked here
-pub fn validate_hello_hmac(hello: &[u8], secret: &[u8], domain: &str) -> Result<()> {
+pub fn validate_hello_hmac(hello: &[u8], secret: &[u8]) -> Result<()> {
     // Minimum size: 5 (record hdr) + 1 (type) + 3 (len) + 2 (ver) + 32 (random) = 43
     if hello.len() < 43 {
         bail!("ClientHello too short");
@@ -57,19 +57,14 @@ pub fn validate_hello_hmac(hello: &[u8], secret: &[u8], domain: &str) -> Result<
     const DIGEST_POS: usize = 11; // start of TLS random field
     const DIGEST_LEN: usize = 32;
 
-    // key = 0xEE || raw_secret || domain_ascii
-    let mut key = Vec::with_capacity(1 + secret.len() + domain.len());
-    key.push(0xEE);
-    key.extend_from_slice(secret);
-    key.extend_from_slice(domain.as_bytes());
-
+    // HMAC key = raw 16-byte secret only (per official MTProxy C implementation)
     // Zero the random field for HMAC computation
     let mut msg = hello.to_vec();
     for b in &mut msg[DIGEST_POS..DIGEST_POS + DIGEST_LEN] {
         *b = 0;
     }
 
-    let mut mac = HmacSha256::new_from_slice(&key)
+    let mut mac = HmacSha256::new_from_slice(secret)
         .map_err(|e| anyhow::anyhow!("hmac init: {e}"))?;
     mac.update(&msg);
     let hmac_result = mac.finalize().into_bytes();
@@ -83,13 +78,14 @@ pub fn validate_hello_hmac(hello: &[u8], secret: &[u8], domain: &str) -> Result<
         .any(|(a, b)| a != b);
 
     if mismatch {
-        let hello_hex = hex::encode(&hello[..hello.len().min(80)]);
+        // Write full hello to /tmp/tg_hello.bin for offline HMAC analysis
+        let _ = std::fs::write("/tmp/tg_hello.bin", hello);
         debug!(
-            key      = %hex::encode(&key),
+            key      = %hex::encode(secret),
             hmac28   = %hex::encode(&hmac_result[..28]),
             digest28 = %hex::encode(&digest[..28]),
-            hello80  = %hello_hex,
-            "FakeTLS HMAC mismatch"
+            hello_len = hello.len(),
+            "FakeTLS HMAC mismatch — hello saved to /tmp/tg_hello.bin"
         );
         bail!("FakeTLS HMAC mismatch — wrong secret or not a proxy client");
     }
