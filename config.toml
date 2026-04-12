@@ -1,0 +1,25 @@
+# MTProxy configuration
+
+# Address to listen on
+listen = "0.0.0.0:443"
+
+# Host to forward non-proxy clients to (FakeTLS masking)
+mask_host = "www.google.com"
+
+# User secrets map.
+# Formats:
+#   classic:   32 hex chars             (all protocols)
+#   secure:    "dd" + 32 hex            (secure intermediate only)
+#   faketls:   "ee" + 32 hex + hex(domain)
+#
+# Generate a random classic secret:
+#   openssl rand -hex 16
+#
+# Generate a FakeTLS secret for cloudflare.com:
+#   SECRET=$(openssl rand -hex 16)
+#   DOMAIN_HEX=$(echo -n "cloudflare.com" | xxd -p)
+#   echo "ee${SECRET}${DOMAIN_HEX}"
+[users]
+user1 = "00000000000000000000000000000000"
+# user2 = "dddeadbeefdeadbeefdeadbeefdeadbeef"
+# user3 = "ee<32hex><hex-domain>"
