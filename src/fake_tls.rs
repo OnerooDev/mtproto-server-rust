@@ -13,6 +13,7 @@ use anyhow::{bail, Result};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tracing::debug;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -78,7 +79,14 @@ pub fn validate_hello_hmac(hello: &[u8], secret: &[u8]) -> Result<()> {
     let result = mac.finalize().into_bytes();
 
     // session_id IS the full 32-byte HMAC
-    if result.as_slice() != &hello[sid_start..sid_end] {
+    let session_id = &hello[sid_start..sid_end];
+    debug!(
+        computed  = %hex::encode(&result),
+        session_id = %hex::encode(session_id),
+        secret    = %hex::encode(secret),
+        "FakeTLS HMAC check"
+    );
+    if result.as_slice() != session_id {
         bail!("FakeTLS HMAC mismatch — wrong secret or not a proxy client");
     }
     Ok(())
