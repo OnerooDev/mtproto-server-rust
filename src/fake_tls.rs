@@ -170,17 +170,8 @@ pub async fn send_server_hello<W: AsyncWrite + Unpin>(
     // ChangeCipherSpec
     w.write_all(&[0x14, 0x03, 0x03, 0x00, 0x01, 0x01]).await?;
 
-    // Fake encrypted-handshake ApplicationData records.
-    // Sizes mimic: EncryptedExtensions+Certificate+CertificateVerify (~1100 bytes)
-    // followed by server Finished (~52 bytes).
-    let fake_cert: Vec<u8> = (0..1100).map(|_| rand::random::<u8>()).collect();
-    w.write_all(&wrap_app_data(&fake_cert)).await?;
-
-    let fake_fin: Vec<u8> = (0..52).map(|_| rand::random::<u8>()).collect();
-    w.write_all(&wrap_app_data(&fake_fin)).await?;
-
     w.flush().await?;
-    debug!("send_server_hello: sent ServerHello + CCS + 2 fake AppData records");
+    debug!("send_server_hello: sent ServerHello + CCS");
     Ok(())
 }
 
