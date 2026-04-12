@@ -168,3 +168,27 @@ pub async fn read_app_data<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>> {
     r.read_exact(&mut payload).await?;
     Ok(payload)
 }
+
+/// Read the first ApplicationData record, skipping any preceding
+/// ChangeCipherSpec (0x14) and Handshake (0x16) records the client
+/// sends as part of the fake TLS handshake completion.
+pub async fn read_first_app_data<R: AsyncRead + Unpin>(r: &mut R) -> Result<Vec<u8>> {
+    loop {
+        let mut hdr = [0u8; TLS_RECORD_HEADER];
+        r.read_exact(&mut hdr).await?;
+        let len = u16::from_be_bytes([hdr[3], hdr[4]]) as usize;
+        match hdr[0] {
+            TLS_APP_DATA => {
+                let mut payload = vec![0u8; len];
+                r.read_exact(&mut payload).await?;
+                return Ok(payload);
+            }
+            0x14 | 0x16 => {
+                // ChangeCipherSpec or Handshake — discard and keep reading
+                let mut discard = vec![0u8; len];
+                r.read_exact(&mut discard).await?;
+            }
+            t => bail!("unexpected TLS record type 0x{:02x} before first AppData", t),
+        }
+    }
+}

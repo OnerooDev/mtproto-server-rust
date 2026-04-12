@@ -154,7 +154,7 @@ async fn handle_faketls(
     fake_tls::send_server_hello(&mut stream, &domain).await?;
 
     // The 64-byte MTProto obfuscation init arrives in the first ApplicationData record
-    let first_payload = fake_tls::read_app_data(&mut stream)
+    let first_payload = fake_tls::read_first_app_data(&mut stream)
         .await
         .context("read first AppData")?;
     if first_payload.len() < 64 {
