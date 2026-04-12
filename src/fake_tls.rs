@@ -23,6 +23,10 @@ pub const TLS_RECORD_HEADER: usize = 5; // type(1) + version(2) + length(2)
 pub const TLS_APP_DATA: u8 = 0x17;
 pub const TLS_VERSION: [u8; 2] = [0x03, 0x03];
 
+/// Max plaintext bytes per `ApplicationData` record toward the client (TDLib / mtcute).
+/// Larger records can cause Telegram clients to drop the connection.
+pub const FAKETLS_MAX_APP_DATA_INNER: usize = 2878;
+
 /// Random field position inside a TLS record (same for ClientHello and ServerHello).
 const RANDOM_POS: usize = 11;
 const RANDOM_LEN: usize = 32;

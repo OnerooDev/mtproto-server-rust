@@ -92,8 +92,11 @@ pub async fn pipe_faketls(
                 break;
             }
             client_enc.apply(&mut buf[..n]);
-            let frame = wrap_app_data(&buf[..n]);
-            cw.write_all(&frame).await?;
+            // One TLS record per chunk: clients enforce a max inner size (~2878 bytes).
+            for chunk in buf[..n].chunks(crate::fake_tls::FAKETLS_MAX_APP_DATA_INNER) {
+                let frame = wrap_app_data(chunk);
+                cw.write_all(&frame).await?;
+            }
         }
         cw.shutdown().await?;
         Ok::<_, anyhow::Error>(())
