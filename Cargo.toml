@@ -23,6 +23,7 @@ toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 bytes = "1"
 lru = "0.12"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 [profile.release]
 opt-level = 3
