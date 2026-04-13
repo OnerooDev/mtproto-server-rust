@@ -86,11 +86,24 @@ async fn handle(
 ) -> Result<()> {
     stream.set_nodelay(true)?;
 
-    // Peek at first byte to detect TLS ClientHello vs raw obfuscated data
-    let mut first = [0u8; 1];
-    stream.peek(&mut first).await?;
+    // Detect FakeTLS by looking for a *valid* TLS Handshake record header.
+    // The obfuscated MTProto init is random-looking and can start with 0x16 by chance,
+    // so checking only the first byte causes misclassification and failed connects.
+    let mut peek6 = [0u8; 6]; // TLS record header (5) + handshake type (1)
+    let n = stream.peek(&mut peek6).await?;
 
-    if first[0] == 0x16 {
+    let looks_like_tls_client_hello = n >= 6
+        && peek6[0] == 0x16 // Handshake record
+        && peek6[1] == 0x03
+        && matches!(peek6[2], 0x01 | 0x02 | 0x03) // TLS 1.0..1.2 legacy_version
+        && {
+            let len = u16::from_be_bytes([peek6[3], peek6[4]]) as usize;
+            // ClientHello is typically hundreds of bytes; reject tiny/huge lengths.
+            (len >= 40) && (len <= 16 * 1024)
+        }
+        && peek6[5] == 0x01; // Handshake message type: ClientHello
+
+    if looks_like_tls_client_hello {
         handle_faketls(stream, peer, state).await
     } else {
         handle_obfuscated(stream, peer, state, mask_host).await
@@ -107,7 +120,7 @@ async fn handle_obfuscated(
     let mut init = [0u8; 64];
     stream.read_exact(&mut init).await.context("read init")?;
 
-    let (dec_key, dec_iv, enc_key, enc_iv, dc_id, _protocol, proxy_secret) =
+    let (dec_key, dec_iv, enc_key, enc_iv, dc_id, _protocol, _proxy_secret) =
         try_secrets_obfuscated(&init, &state.secrets)?;
 
     // Replay check on pre_key[0..8]
