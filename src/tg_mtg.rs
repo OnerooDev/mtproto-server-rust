@@ -22,10 +22,16 @@ const HF_CONNECTION_TYPE: [u8; 4] = [0xdd, 0xdd, 0xdd, 0xdd];
 fn cipher_from_frame(frame: &[u8; HF_LEN], secret: &[u8]) -> Result<AesCtr> {
     let key = &frame[HF_OFFSET_KEY..HF_OFFSET_IV];
     let iv = &frame[HF_OFFSET_IV..HF_OFFSET_CONNECTION_TYPE];
-    let mut hasher = Sha256::new();
-    hasher.update(key);
-    hasher.update(secret);
-    let aes_key: [u8; 32] = hasher.finalize().into();
+    // mtg: if Secret is nil, use key bytes directly; otherwise sha256(key || secret).
+    // This difference is critical for the proxy→Telegram DC obfuscation handshake.
+    let aes_key: [u8; 32] = if secret.is_empty() {
+        key.try_into().map_err(|_| anyhow::anyhow!("key len"))?
+    } else {
+        let mut hasher = Sha256::new();
+        hasher.update(key);
+        hasher.update(secret);
+        hasher.finalize().into()
+    };
     let aes_iv: [u8; 16] = iv.try_into().map_err(|_| anyhow::anyhow!("iv len"))?;
     Ok(AesCtr::new(&aes_key, &aes_iv))
 }
