@@ -10,7 +10,7 @@ mod tg_mtg;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use config::{Config, SecretMode};
-use crypto::{derive_keys, AesCtr};
+use crypto::{derive_mtg_client_ciphers, AesCtr};
 use replay::ReplayCache;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
@@ -120,7 +120,7 @@ async fn handle_obfuscated(
     let mut init = [0u8; 64];
     stream.read_exact(&mut init).await.context("read init")?;
 
-    let (dec_key, dec_iv, enc_key, enc_iv, dc_id, _protocol, _proxy_secret) =
+    let (client_dec, client_enc, dc_id, _protocol, _proxy_secret) =
         try_secrets_obfuscated(&init, &state.secrets)?;
 
     // Replay check on pre_key[0..8]
@@ -130,13 +130,7 @@ async fn handle_obfuscated(
     }
 
     info!(%peer, dc_id, "new obfuscated connection");
-
-    let mut client_dec = AesCtr::new(&dec_key, &dec_iv);
-    let client_enc = AesCtr::new(&enc_key, &enc_iv);
-
-    // Advance decrypt keystream past the 64-byte init (already consumed from socket)
-    let mut dummy = init;
-    client_dec.apply(&mut dummy);
+    // client_dec keystream already advanced by decrypting init in `try_secrets_obfuscated`.
 
     let (tg_host, tg_port) = telegram::dc_addr(dc_id, state.prefer_ipv6);
     let mut tg = TcpStream::connect((tg_host, tg_port))
@@ -189,14 +183,11 @@ async fn handle_faketls(
         );
     }
 
-    let (dec_key, dec_iv, enc_key, enc_iv) = derive_keys(&init, &secret);
-
-    let mut client_dec = AesCtr::new(&dec_key, &dec_iv);
-    let client_enc = AesCtr::new(&enc_key, &enc_iv);
-
-    // Advance decrypt keystream past the 64-byte init (already consumed from TLS payload)
-    let mut dummy = init;
-    client_dec.apply(&mut dummy);
+    // Derive mtg-compatible obfuscation ciphers and decrypt init to advance keystream.
+    let (mut client_dec, client_enc) = derive_mtg_client_ciphers(&init, &secret);
+    let mut init_plain = init;
+    client_dec.apply(&mut init_plain);
+    let _ = handshake::parse_handshake(&init_plain).context("parse FakeTLS init")?;
 
     info!(%peer, dc_id = init_info.dc_id, "new FakeTLS connection");
 
@@ -250,8 +241,7 @@ fn find_obfuscated_init_in_faketls_appdata(
     let max_scan = payload.len().saturating_sub(64).min(2048);
     for offset in 0..=max_scan {
         let init: [u8; 64] = payload[offset..offset + 64].try_into().unwrap();
-        let (dec_key, dec_iv, _enc_key, _enc_iv) = derive_keys(&init, secret);
-        let mut dec = AesCtr::new(&dec_key, &dec_iv);
+        let (mut dec, _enc) = derive_mtg_client_ciphers(&init, secret);
         let mut init_plain = init;
         dec.apply(&mut init_plain);
         if let Ok(info) = handshake::parse_handshake(&init_plain) {
@@ -271,25 +261,16 @@ fn find_obfuscated_init_in_faketls_appdata(
 fn try_secrets_obfuscated(
     init: &[u8; 64],
     secrets: &HashMap<String, SecretMode>,
-) -> Result<(
-    [u8; 32],
-    [u8; 16],
-    [u8; 32],
-    [u8; 16],
-    i16,
-    handshake::Protocol,
-    Vec<u8>,
-)> {
+) -> Result<(AesCtr, AesCtr, i16, handshake::Protocol, Vec<u8>)> {
     for (_name, mode) in secrets {
         if let SecretMode::FakeTls { .. } = mode {
             continue;
         }
 
         let raw = mode.raw_secret();
-        let (dec_key, dec_iv, enc_key, enc_iv) = derive_keys(init, raw);
+        let (mut recv, send) = derive_mtg_client_ciphers(init, raw);
         let mut buf = *init;
-        let mut dec = AesCtr::new(&dec_key, &dec_iv);
-        dec.apply(&mut buf);
+        recv.apply(&mut buf);
 
         if let Ok(info) = handshake::parse_handshake(&buf) {
             if let SecretMode::Secure(_) = mode {
@@ -297,15 +278,7 @@ fn try_secrets_obfuscated(
                     continue;
                 }
             }
-            return Ok((
-                dec_key,
-                dec_iv,
-                enc_key,
-                enc_iv,
-                info.dc_id,
-                info.protocol,
-                raw.to_vec(),
-            ));
+            return Ok((recv, send, info.dc_id, info.protocol, raw.to_vec()));
         }
     }
     bail!("no matching secret for obfuscated connection")
