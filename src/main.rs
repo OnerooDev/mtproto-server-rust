@@ -178,41 +178,47 @@ async fn handle_faketls(
     let first_payload = fake_tls::read_first_app_data(&mut stream)
         .await
         .context("read first AppData")?;
-    if first_payload.len() < 64 {
-        bail!("first AppData too short: {} bytes", first_payload.len());
+    let (init_offset, init, init_info) = find_obfuscated_init_in_faketls_appdata(&first_payload, &secret)
+        .context("locate MTProto init inside first AppData")?;
+    if init_offset != 0 {
+        debug!(
+            %peer,
+            init_offset,
+            payload_len = first_payload.len(),
+            "FakeTLS: MTProto init not at payload start; skipping prefix bytes"
+        );
     }
 
-    let init: [u8; 64] = first_payload[..64].try_into().unwrap();
     let (dec_key, dec_iv, enc_key, enc_iv) = derive_keys(&init, &secret);
 
     let mut client_dec = AesCtr::new(&dec_key, &dec_iv);
     let client_enc = AesCtr::new(&enc_key, &enc_iv);
 
-    // Decrypt init to advance keystream and extract DC id
-    let mut init_plain = init;
-    client_dec.apply(&mut init_plain);
-    let info = handshake::parse_handshake(&init_plain).context("parse FakeTLS init")?;
+    // Advance decrypt keystream past the 64-byte init (already consumed from TLS payload)
+    let mut dummy = init;
+    client_dec.apply(&mut dummy);
 
-    info!(%peer, dc_id = info.dc_id, "new FakeTLS connection");
+    info!(%peer, dc_id = init_info.dc_id, "new FakeTLS connection");
 
-    // Decrypt any remaining bytes from the first AppData (continuation after init)
-    let leftover = if first_payload.len() > 64 {
-        let mut rest = first_payload[64..].to_vec();
+    // Decrypt any bytes after init inside the same AppData (continuation after init)
+    let after = init_offset + 64;
+    let leftover = if first_payload.len() > after {
+        let mut rest = first_payload[after..].to_vec();
         client_dec.apply(&mut rest);
         rest
     } else {
         vec![]
     };
 
-    let (tg_host, tg_port) = telegram::dc_addr(info.dc_id, state.prefer_ipv6);
+    let (tg_host, tg_port) = telegram::dc_addr(init_info.dc_id, state.prefer_ipv6);
     let mut tg = TcpStream::connect((tg_host, tg_port))
         .await
-        .with_context(|| format!("connect to DC{} {tg_host}:{tg_port}", info.dc_id))?;
+        .with_context(|| format!("connect to DC{} {tg_host}:{tg_port}", init_info.dc_id))?;
     tg.set_nodelay(true)?;
 
     // Proxy→Telegram connection uses standard obfuscated protocol with no secret.
     // The user secret is only for the client→proxy leg.
-    let (tg_recv, tg_send) = tg_mtg::send_telegram_handshake(&mut tg, &[], info.dc_id)
+    let (tg_recv, tg_send) = tg_mtg::send_telegram_handshake(&mut tg, &[], init_info.dc_id)
         .await
         .context("Telegram DC obfuscation handshake")?;
 
@@ -226,6 +232,36 @@ async fn handle_faketls(
         leftover,
     )
     .await
+}
+
+/// In FakeTLS, clients may send an ApplicationData record that contains extra bytes
+/// before the 64-byte obfuscation init (e.g. fake Finished / padding). Scan for a
+/// valid obfuscation init within the payload.
+fn find_obfuscated_init_in_faketls_appdata(
+    payload: &[u8],
+    secret: &[u8],
+) -> Result<(usize, [u8; 64], handshake::HandshakeInfo)> {
+    if payload.len() < 64 {
+        bail!("first AppData too short: {} bytes", payload.len());
+    }
+
+    // Scan a reasonable window. In practice the init is at offset 0, but some clients
+    // can prepend extra data. Limit scanning to keep CPU bounded.
+    let max_scan = payload.len().saturating_sub(64).min(2048);
+    for offset in 0..=max_scan {
+        let init: [u8; 64] = payload[offset..offset + 64].try_into().unwrap();
+        let (dec_key, dec_iv, _enc_key, _enc_iv) = derive_keys(&init, secret);
+        let mut dec = AesCtr::new(&dec_key, &dec_iv);
+        let mut init_plain = init;
+        dec.apply(&mut init_plain);
+        if let Ok(info) = handshake::parse_handshake(&init_plain) {
+            // Heuristic sanity: DC id cannot be 0.
+            if info.dc_id != 0 {
+                return Ok((offset, init, info));
+            }
+        }
+    }
+    bail!("could not find valid 64-byte MTProto init in first AppData (len={})", payload.len())
 }
 
 // ---------------------------------------------------------------------------
